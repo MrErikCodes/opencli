@@ -207,6 +207,22 @@ add_subdomains_to_zone() {
 
 
 
+# puts the existing DKIM key back after a reset, the key itself stays so mail already signed with it keeps verifying
+add_existing_dkim_to_zone(){
+  local domain_name="$1"
+  local zone_file="/etc/bind/zones/$domain_name.zone"
+  local dkim_file="/usr/local/mail/openmail/docker-data/dms/config/opendkim/keys/${domain_name}/mail.txt"
+  [[ -f "$dkim_file" && -f "$zone_file" ]] || return 0
+  grep -q "mail\._domainkey" "$zone_file" && return 0
+  {
+    printf '\n'
+    sed -E "s/^mail\._domainkey[[:space:]]+IN/mail._domainkey\t14400\tIN/" "$dkim_file"
+    printf '\n'
+  } >> "$zone_file"
+  podman exec openpanel_dns rndc reload "$domain_name" >/dev/null 2>&1
+  echo "Restored DKIM record mail._domainkey for domain: $domain_name"
+}
+
 restore_zone_to_default(){
   DOMAIN=$1
   YES="$2"
@@ -221,6 +237,7 @@ restore_zone_to_default(){
 	  # todo: cron to cleanup zones daily, older than 24hrs.
 	  create_dns_zone_for_domain "$domain_name"
 	  add_subdomains_to_zone "$domain_name"
+	  add_existing_dkim_to_zone "$domain_name"
   }
 
   if [[ -n "$DOMAIN" ]]; then

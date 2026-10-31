@@ -338,22 +338,10 @@ show_ssl_logs() {
 
     echo "Showing SSL-related log lines for $DOMAIN"	
     echo "-------------------------------------------------------"
-	# podman logs --tail 1000 caddy 2>&1  | grep "$DOMAIN" | grep -Ei 'tls|acme|certificate|renew|obtain|challenge'
-
-    # LogPath is only populated for json-file/k8s-file log drivers -- podman's default journald driver leaves this empty and hits the same error path below
-    local log_path
-    log_path=$(podman inspect --format='{{.LogPath}}' caddy 2>/dev/null)
-
-    if [ -z "$log_path" ] || [ ! -f "$log_path" ]; then
-        echo "ERROR: Could not determine Caddy log file path."
-        exit 1
-    fi
-
-    if [ "$follow" -eq 1 ]; then
-        tail -n "$lines" -f "$log_path"
-    else
-        tail -n "$lines" "$log_path"
-    fi | jq -r '.log' | jq -R -c --arg domain "$DOMAIN" '
+    # straight from podman, the container's LogPath is gone on newer podman and is empty with the journald driver
+    local logs_cmd=(timeout 120 podman logs --tail "$lines" caddy)
+    [ "$follow" -eq 1 ] && logs_cmd=(podman logs -f --tail "$lines" caddy)
+    "${logs_cmd[@]}" 2>&1 | jq -R -c --arg domain "$DOMAIN" '
         fromjson? |
         select(
             .
@@ -362,12 +350,15 @@ show_ssl_logs() {
                 .request.host? == $domain or
                 .request.tls.server_name? == $domain or
                 .server_name? == $domain or
-                (.identifiers?[]? == $domain)
+                .identifier? == $domain or
+                .identifier? == ("www." + $domain) or
+                (.identifiers?[]? == $domain) or
+                ((.error? // "") | startswith("[" + $domain + "]") or startswith("[www." + $domain + "]"))
             )
             and
             (
-                (.logger? | test("tls|acme")) or
-                (.msg? | test("certificate|renew|obtain|challenge"; "i"))
+                ((.logger // "") | test("tls|acme")) or
+                ((.msg // "") | test("certificate|renew|obtain|challenge"; "i"))
             )
         )
     '
