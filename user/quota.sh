@@ -5,7 +5,7 @@
 # Usage: opencli user-quota [--update <username|--all>]
 # Author: Stefan Pejcic
 # Created: 16.11.2023
-# Last Modified: 26.10.2026
+# Last Modified: 01.11.2026
 # Company: OpenPanel, LLC.
 # Copyright (c) openpanel.com
 # 
@@ -307,19 +307,22 @@ blocks_to_gb() {
     awk -v b="$1" -v f="$GB_TO_BLOCKS" 'BEGIN { printf "%.2f", b / f }'
 }
 
-# emails the user (if they have notify_disk_limit on) and tells the admin via sentinel, once until usage drops again
+# emails the user (if they have notify_disk_limit on) and tells the admin via sentinel, once per level until usage drops again
 notify_disk_limits() {
     command -v jq >/dev/null 2>&1 || return 0
 
-    local over username dp ip du dh iu ih flag text usage up_name cur_disk up_disk cur_inodes up_inodes upgrade_plan upgrade_text
+    local over username dp ip du dh iu ih flag level text usage up_name cur_disk up_disk cur_inodes up_inodes upgrade_plan upgrade_text
+    local subject intro title message severity
     local -a raised
     over=$(users_over_quota)
 
     while read -r username dp ip du dh iu ih; do
         [[ -n "$username" ]] || continue
-        # already notified while over the limit
+        level=close
+        (( dp >= 100 || ip >= 100 )) && level=over
+        # already notified at this level, going from close to over notifies again
         flag="/tmp/${username}_notify_disk_limit"
-        [[ -f "$flag" ]] && continue
+        [[ -f "$flag" && ( "$(cat "$flag" 2>/dev/null)" == over || "$level" == close ) ]] && continue
 
         text=""
         (( dp >= DISK_NOTIFY_PERCENT )) && text+="disk ${dp}% ($(blocks_to_gb "$du") of $(blocks_to_gb "$dh") GB) "
@@ -343,16 +346,28 @@ notify_disk_limits() {
             fi
         fi
 
-        send_user_email "$username" "Account $username is almost out of disk space" \
-            "Account $username is close to its hosting plan limit, checked $(date '+%Y-%m-%d %H:%M:%S %Z')."$'\n\n'"Once the limit is reached, websites and email can stop working, and new files, uploads and emails will fail." \
+        if [[ "$level" == over ]]; then
+            subject="Account $username is over its disk limit"
+            intro="Account $username is over its hosting plan limit, checked $(date '+%Y-%m-%d %H:%M:%S %Z')."$'\n\n'"Websites and email can stop working, and new files, uploads and emails will fail until you free up space."
+            title="User $username is over the disk limit"
+            message="OpenPanel user '$username' is over the hosting plan limit: ${text% }."
+            severity=warning
+        else
+            subject="Account $username is almost out of disk space"
+            intro="Account $username is close to its hosting plan limit, checked $(date '+%Y-%m-%d %H:%M:%S %Z')."$'\n\n'"Once the limit is reached, websites and email can stop working, and new files, uploads and emails will fail."
+            title="User $username is close to the disk limit"
+            message="OpenPanel user '$username' is close to the hosting plan limit: ${text% }."
+            severity=info
+        fi
+
+        send_user_email "$username" "$subject" "$intro" \
             notify_disk_limit "$usage" "$upgrade_plan" "$upgrade_text" \
             "To free up space, find the biggest folders on the Disk Usage and Inodes Explorer pages in OpenPanel, and delete old backups, logs and files you no longer need. If you need more space, ask your hosting provider for a bigger plan." || true
 
-        nohup opencli sentinel --action=user_quota --title="User $username is close to the disk limit" \
-            --message="OpenPanel user '$username' is close to the hosting plan limit: ${text% }." >/dev/null 2>&1 &
+        nohup opencli sentinel --action=user_quota --title="$title" --message="$message" --severity="$severity" >/dev/null 2>&1 &
         disown || true
 
-        touch "$flag"
+        echo "$level" > "$flag"
     done <<< "$over"
 
     # users back under both thresholds get notified again the next time they cross one
